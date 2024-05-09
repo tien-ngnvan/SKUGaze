@@ -5,9 +5,9 @@ import logging
 from pathlib import Path
 from copy import deepcopy
 
-from yoloxyz.backbones.yolov7.models.yolo import Model, Detect, IDetect
-from yoloxyz.backbones.yolov7.utils.autoanchor import check_anchor_order
-from yoloxyz.backbones.yolov7.utils.torch_utils import (
+from backbones.yolov7.models.yolo import Detect, IDetect
+from backbones.yolov7.utils.autoanchor import check_anchor_order
+from backbones.yolov7.utils.torch_utils import (
     time_synchronized, 
     fuse_conv_and_bn, 
     model_info, 
@@ -30,10 +30,9 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-
-class Model(Model):
+class ModelV7(nn.Module):
     def __init__(self, cfg='yolov5s.yaml', ch=3, nc=None, anchors=None):  # model, input channels, number of classes
-        super(Model, self).__init__()
+        super(ModelV7, self).__init__()
         if isinstance(cfg, dict):
             self.yaml = cfg  # model dict
         else:  # is *.yaml
@@ -57,7 +56,7 @@ class Model(Model):
 
         # Build strides, anchors Detect()
         for m in self.model[-5:]:
-            if isinstance(m, IKeypoint) or isinstance(m, IDetectHead) or isinstance(m, IDetectBody):
+            if isinstance(m, Detect) or isinstance(m, IDetect) or isinstance(m, IKeypoint) or isinstance(m, IDetectHead) or isinstance(m, IDetectBody):
                 s = 256  # 2x min stride
                 m.inplace = self.inplace
                 #m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s))])  # forward
@@ -267,3 +266,33 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
             ch = []
         ch.append(c2)
     return nn.Sequential(*layers), sorted(save)
+
+
+if __name__ == '__main__':
+    import argparse
+    from backbones.yolov7.utils.torch_utils import select_device
+    from backbones.yolov7.utils.general import check_file, set_logging
+
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--cfg', type=str, default='yolov5s.yaml', help='model.yaml')
+    parser.add_argument('--device', default='cpu', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    opt = parser.parse_args()
+    opt.cfg = check_file(opt.cfg)  # check file
+    set_logging()
+    device = select_device(opt.device)
+
+    # Create model
+    model = ModelV7(opt.cfg).to(device)
+    # model.train()
+    # print(model)
+    # Profile
+    # img = torch.rand(8 if torch.cuda.is_available() else 1, 3, 320, 320).to(device)
+    # y = model(img, profile=True)
+
+    # Tensorboard (not working https://github.com/ultralytics/yolov5/issues/2898)
+    # from torch.utils.tensorboard import SummaryWriter
+    # tb_writer = SummaryWriter('.')
+    # logger.info("Run 'tensorboard --logdir=models' to view tensorboard at http://localhost:6006/")
+    # tb_writer.add_graph(torch.jit.trace(model, img, strict=False), [])  # add model graph
+    # tb_writer.add_image('test', img[0], dataformats='CWH')  # add model to tensorboard

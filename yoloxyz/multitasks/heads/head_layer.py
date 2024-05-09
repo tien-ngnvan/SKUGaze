@@ -1,16 +1,55 @@
 
 import torch
+import torch.nn as nn
+from yoloxyz.backbones.yolov7.models.yolo import IDetect
 
-from yoloxyz.backbones.yolov7.models.yolo import IKeypoint, IDetect
+from yoloxyz.multitasks.models.yolov7.common import ImplicitA, ImplicitM, DWConv
 
 
 
-class Ikeypoint(IKeypoint):   
+class IKeypoint(nn.Module):
+    stride = None  # strides computed during build
+    export = False  # onnx export
+
+    def __init__(self, nc=80, anchors=(), nkpt=5, ch=(), inplace=True, dw_conv_kpt=False):  # detection layer
+        super(IKeypoint, self).__init__()
+
+        self.nc = nc  # number of classes
+        self.nkpt = nkpt
+        self.dw_conv_kpt = dw_conv_kpt
+        self.no_det=(nc + 5)  # number of outputs per anchor for box and class
+        self.no_kpt = 3*self.nkpt ## number of outputs per anchor for keypoints
+        self.no = self.no_det+self.no_kpt
+        self.nl = len(anchors)  # number of detection layers
+        self.na = len(anchors[0]) // 2  # number of anchors
+        self.grid = [torch.zeros(1)] * self.nl  # init grid
+        self.flip_test = False
+        a = torch.tensor(anchors).float().view(self.nl, -1, 2)
+        self.register_buffer('anchors', a)  # shape(nl,na,2)
+        self.register_buffer('anchor_grid', a.clone().view(self.nl, 1, -1, 1, 1, 2))  # shape(nl,1,na,1,1,2)
+        self.m = nn.ModuleList(nn.Conv2d(x, self.no_det * self.na, 1) for x in ch)  # output conv
+
+        self.ia = nn.ModuleList(ImplicitA(x) for x in ch)
+        self.im = nn.ModuleList(ImplicitM(self.no_det * self.na) for _ in ch)
+
+        if self.nkpt is not None:
+            if self.dw_conv_kpt: #keypoint head is slightly more complex
+                self.m_kpt = nn.ModuleList(
+                            nn.Sequential(DWConv(x, x, k=3), Conv(x,x),
+                                          DWConv(x, x, k=3), Conv(x, x),
+                                          DWConv(x, x, k=3), Conv(x,x),
+                                          DWConv(x, x, k=3), Conv(x, x),
+                                          DWConv(x, x, k=3), Conv(x, x),
+                                          DWConv(x, x, k=3), nn.Conv2d(x, self.no_kpt * self.na, 1)) for x in ch)
+            else: #keypoint head is a single convolution
+                self.m_kpt = nn.ModuleList(nn.Conv2d(x, self.no_kpt * self.na, 1) for x in ch)
+
+        self.inplace = inplace  # use in-place ops (e.g. slice assignment)
+
     def forward(self, x):
         # x = x.copy()  # for profiling
         z = []  # inference output
         self.training |= self.export
-        
         if self.export:
             for i in range(self.nl):
                 if self.nkpt is None or self.nkpt==0:
@@ -20,7 +59,7 @@ class Ikeypoint(IKeypoint):
                 #bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
                 #x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
             return x
-        
+
         for i in range(self.nl):
             if self.nkpt is None or self.nkpt==0:
                 x[i] = self.im[i](self.m[i](self.ia[i](x[i])))  # conv
@@ -31,9 +70,9 @@ class Ikeypoint(IKeypoint):
 
             x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
             
-            x_det = x[i][..., :self.no].clone().detach()
-            x_kpt = x[i][..., self.no:].clone().detach() # torch.Size([3, 3, 80, 80, 17])
-            
+            x_det = x[i][..., :self.no_det].clone().detach()
+            x_kpt = x[i][..., self.no_det:].clone().detach() # torch.Size([3, 3, 80, 80, 17])
+
             if not self.training:  # inference 
                 if self.grid[i].shape[2:4] != x[i].shape[2:4]:
                     self.grid[i] = self._make_grid(nx, ny).to(x[i].device)
@@ -44,7 +83,7 @@ class Ikeypoint(IKeypoint):
                     y = x[i].sigmoid()
                 else:
                     y = x_det.sigmoid()
-                    
+
                 if self.inplace:
                     xy = (y[..., 0:2] * 2. - 0.5 + self.grid[i]) * self.stride[i]  # xy
                     wh = (y[..., 2:4] * 2) ** 2 * self.anchor_grid[i].view(1, self.na, 1, 1, 2) # wh
@@ -64,6 +103,11 @@ class Ikeypoint(IKeypoint):
                 z.append(y.view(bs, -1, self.no))
 
         return x if self.training else (torch.cat(z, 1), x)
+
+    @staticmethod
+    def _make_grid(nx=20, ny=20):
+        yv, xv = torch.meshgrid([torch.arange(ny), torch.arange(nx)])
+        return torch.stack((xv, yv), 2).view((1, 1, ny, nx, 2)).float()
     
     
 class IDetectBody(IDetect):

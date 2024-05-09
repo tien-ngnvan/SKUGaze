@@ -20,9 +20,11 @@ from PIL import Image, ExifTags
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-from utils.general import check_requirements, xyxy2xywh, xywh2xyxy, xywhn2xyxy, xyn2xy, segment2box, segments2boxes, \
+from utils.general import check_requirements, xyxy2xywh, xywh2xyxy, xyn2xy, segment2box, segments2boxes, \
     resample_segments, clean_str
 from utils.torch_utils import torch_distributed_zero_first
+
+from multitasks.utils.general import xywhn2xyxy
 
 # Parameters
 help_url = 'https://github.com/ultralytics/yolov5/wiki/Train-Custom-Data'
@@ -57,8 +59,10 @@ def exif_size(img):
 
 
 def create_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, augment=False, cache=False, pad=0.0, rect=False,
-                      rank=-1, world_size=1, workers=8, image_weights=False, quad=False, prefix='', tidl_load=False, kpt_label=False):
+                      rank=-1, world_size=1, workers=8, image_weights=False, quad=False, prefix='', tidl_load=False, 
+                      kpt_label=False, multiloss=False):
     # Make sure only the first process in DDP process the dataset first, and the following others can use the cache
+
     with torch_distributed_zero_first(rank):
         dataset = LoadImagesAndLabels(path, imgsz, batch_size,
                                       augment=augment,  # augment images
@@ -71,19 +75,28 @@ def create_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, augment=Fa
                                       image_weights=image_weights,
                                       prefix=prefix,
                                       tidl_load=tidl_load,
-                                      kpt_label=kpt_label)
+                                      kpt_label=kpt_label,
+                                      multiloss=multiloss)
 
     batch_size = min(batch_size, len(dataset))
     nw = min([os.cpu_count() // world_size, batch_size if batch_size > 1 else 0, workers])  # number of workers
     sampler = torch.utils.data.distributed.DistributedSampler(dataset) if rank != -1 else None
     loader = torch.utils.data.DataLoader if image_weights else InfiniteDataLoader
     # Use torch.utils.data.DataLoader() if dataset.properties will update during training else InfiniteDataLoader()
+    
+    if quad:
+        collate = LoadImagesAndLabels.collate_fn4
+    elif multiloss:
+        collate = LoadImagesAndLabels.multi_collate_fn
+    else:
+        collate = LoadImagesAndLabels.collate_fn
+        
     dataloader = loader(dataset,
                         batch_size=batch_size,
                         num_workers=nw,
                         sampler=sampler,
                         pin_memory=True,
-                        collate_fn=LoadImagesAndLabels.collate_fn4 if quad else LoadImagesAndLabels.collate_fn)
+                        collate_fn=collate)
     return dataloader, dataset
 
 
@@ -348,7 +361,8 @@ def img2label_paths(img_paths):
 
 class LoadImagesAndLabels(Dataset):  # for training/testing
     def __init__(self, path, img_size=640, batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
-                 cache_images=False, single_cls=False, stride=32, pad=0.0, prefix='',square=False, tidl_load=False, kpt_label=0):
+                 cache_images=False, single_cls=False, stride=32, pad=0.0, prefix='',square=False, tidl_load=False, 
+                 kpt_label=0, multiloss=False):
         self.img_size = img_size
         self.augment = augment
         self.hyp = hyp
@@ -669,6 +683,16 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
             l[:, 0] = i  # add target image index for build_targets()
 
         label = torch.cat(label, 0)
+        
+        return torch.stack(img, 0), {'IDetect':label}, path, shapes
+        
+    @staticmethod
+    def multi_collate_fn(batch):
+        img, label, path, shapes = zip(*batch)  # transposed
+        for i, l in enumerate(label):
+            l[:, 0] = i  # add target image index for build_targets()
+
+        label = torch.cat(label, 0)
 
         # Split samples in batc into right class label for pretrain
         # WIDER_FACE: face = 0, head = 1, body = 2
@@ -679,8 +703,6 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         head_label[:, 1], body_label[: 1] = 0, 0
         
         return torch.stack(img, 0), {'IKeypoint':face_label, 'IDetectHead':head_label[:,:6], 'IDetectBody':body_label[:,:6]}, path, shapes
-        
-        #return torch.stack(img, 0), {'IDetectHead':head_label}, path, shapes
 
     @staticmethod
     def collate_fn4(batch):

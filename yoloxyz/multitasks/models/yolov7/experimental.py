@@ -6,8 +6,8 @@ import torch.nn as nn
 import random
 
 
-from yoloxyz.backbones.yolov7.models.common import Conv, DWConv
-from yoloxyz.backbones.yolov7.utils.google_utils import attempt_download
+from backbones.yolov7.models.common import Conv, DWConv
+from backbones.yolov7.utils.google_utils import attempt_download
 
 
 class CrossConv(nn.Module):

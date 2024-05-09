@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from yoloxyz.backbones.yolov7.utils.general import bbox_iou
+from multitasks.utils.general import bbox_iou
 from yoloxyz.backbones.yolov7.utils.torch_utils import is_parallel
 
 
