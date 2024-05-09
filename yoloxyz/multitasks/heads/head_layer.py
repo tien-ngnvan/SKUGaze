@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 from yoloxyz.backbones.yolov7.models.yolo import IDetect
 
-from yoloxyz.multitasks.models.yolov7.common import ImplicitA, ImplicitM, DWConv
+from yoloxyz.multitasks.models.yolov7.common import ImplicitA, ImplicitM, DWConv, Conv
 
 
 

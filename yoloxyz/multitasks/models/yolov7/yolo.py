@@ -125,6 +125,9 @@ class ModelV7(nn.Module):
 
             if isinstance(m, IDetectBody):
                 model_outputs.update({'IDetectBody' : x})
+                
+            if isinstance(m, IDetect):
+                model_outputs.update({'IDetect' : x})
 
             y.append(x if m.i in self.save else None)  # save output
 
