@@ -1,6 +1,11 @@
 # YOLOmultitask
 This tutorial give instruction how to run and setup Yolomultitask
 
+## Installed package
+```
+pip install -r yoloxyz/multitasks/requirements/requirements.txt -q
+```
+
 ## Data
 Prepare the data follow by structure ([Download](https://drive.google.com/drive/folders/1vjAJUxpThYOlOp4bSLDg6rFZyYd4ZsHc?usp=sharing) data to test model)
 ```

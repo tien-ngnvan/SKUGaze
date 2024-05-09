@@ -57,7 +57,7 @@ def get_average_tensor(tensor_list):
 
 def train(hyp, opt, device, tb_writer=None):
     logger.info(colorstr('hyperparameters: ') + ', '.join(f'{k}={v}' for k, v in hyp.items()))
-    save_dir, epochs, batch_size, total_batch_size, weights, rank, kpt_label, freeze, multiloss, detect_layer, warmup = \
+    save_dir, epochs, batch_size, total_batch_size, weights, rank, kpt_label, freeze, multilosses, detect_layer, warmup = \
         Path(opt.save_dir), opt.epochs, opt.batch_size, opt.total_batch_size, opt.weights, opt.global_rank, opt.kpt_label, opt.freeze, opt.multilosses, opt.detect_layer, opt.warmup
 
     # Directories
@@ -225,7 +225,7 @@ def train(hyp, opt, device, tb_writer=None):
     dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt,
                                             hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, rank=rank,
                                             world_size=opt.world_size, workers=opt.workers,
-                                            image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '), kpt_label=kpt_label, multiloss=multiloss)
+                                            image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '), kpt_label=kpt_label, multiloss=multilosses)
     mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # max label class
 
     nb = len(dataloader)  # number of batches
@@ -237,7 +237,7 @@ def train(hyp, opt, device, tb_writer=None):
                                        hyp=hyp, cache=opt.cache_images and not opt.notest, rect=True, rank=-1,
                                        world_size=opt.world_size, workers=opt.workers,
                                        pad=0.5, prefix=colorstr('val: '), kpt_label=kpt_label,
-                                       multiloss=multiloss)[0]
+                                       multiloss=multilosses)[0]
 
         if not opt.resume:
             labels = np.concatenate(dataset.labels, 0)
@@ -283,7 +283,7 @@ def train(hyp, opt, device, tb_writer=None):
     scaler = amp.GradScaler(enabled=cuda)
     
     # init loss function
-    if multiloss:
+    if multilosses:
         loss_fn = {
             'IKeypoint' : ComputeLoss(model, kpt_label=kpt_label),
             'IDetectHead' : ComputeLoss(model),
