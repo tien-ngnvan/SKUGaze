@@ -211,7 +211,8 @@ class ModelV7(nn.Module):
 
 def parse_model(d, ch):  # model_dict, input_channels(3)
     logger.info('\n%3s%18s%3s%10s  %-40s%-30s' % ('', 'from', 'n', 'params', 'module', 'arguments'))
-    anchors, nc, nkpt, gd, gw = d['anchors'], d['nc'], d['nkpt'], d['depth_multiple'], d['width_multiple']
+    anchors, nc, gd, gw = d['anchors'], d['nc'], d['depth_multiple'], d['width_multiple']
+    nkpt = d['nkpt'] if 'nkpt' in list(d.keys()) else 0
     na = (len(anchors[0]) // 2) if isinstance(anchors, list) else anchors  # number of anchors
     no = na * (nc + 5 + 2*nkpt)   # number of outputs = anchors * (classes + 5)
 

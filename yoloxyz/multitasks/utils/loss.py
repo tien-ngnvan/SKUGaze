@@ -139,7 +139,8 @@ class ComputeLoss:
         self.ssi = list(det.stride).index(16) if autobalance else 0  # stride 16 index
         self.BCEcls, self.BCEobj, self.gr, self.hyp, self.autobalance = BCEcls, BCEobj, model.gr, h, autobalance
         for k in 'na', 'nc', 'nl', 'anchors', 'nkpt':
-            setattr(self, k, getattr(det, k))
+            if hasattr(det, k):
+                setattr(self, k, getattr(det, k))
 
     def __call__(self, p, targets):  # predictions, targets, model
         device = targets.device
