@@ -20,10 +20,9 @@ from PIL import Image, ExifTags
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-from utils.general import check_requirements, xyxy2xywh, xywh2xyxy, xyn2xy, segment2box, segments2boxes, \
+from utils.general import check_requirements, xyxy2xywh, xywh2xyxy, xyn2xy, segment2box, \
     resample_segments, clean_str
-from utils.torch_utils import torch_distributed_zero_first
-
+from backbones.yolov7.utils.torch_utils import torch_distributed_zero_first
 from multitasks.utils.general import xywhn2xyxy
 
 # Parameters

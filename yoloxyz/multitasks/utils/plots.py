@@ -10,7 +10,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 from yoloxyz.backbones.yolov7.utils.general import xywh2xyxy
 

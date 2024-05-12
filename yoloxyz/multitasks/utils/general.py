@@ -1,8 +1,15 @@
+import re
+import math
 import torch
 import torchvision
 import numpy as np
 import cv2
 import time
+from pathlib import Path
+from glob import glob
+
+from backbones.yolov7.utils.general import box_iou, xyxy2xywh
+
 
 
 def non_max_suppression(prediction, conf_thres=0.25, iou_thres=0.45, classes=None, agnostic=False, multi_label=False,
@@ -296,43 +303,6 @@ def bbox_iou(box1, box2, x1y1x2y2=True, GIoU=False, DIoU=False, CIoU=False, EIoU
             return iou - (c_area - union) / c_area  # GIoU https://arxiv.org/pdf/1902.09630.pdf
     return iou  # IoU
 
-def check_anchors(dataset, model, thr=4.0, imgsz=640):
-    # Check anchor fit to data, recompute if necessary
-    prefix = colorstr('autoanchor: ')
-    print(f'\n{prefix}Analyzing anchors... ', end='')
-    m = model.module.model[-1] if hasattr(model, 'module') else model.model[-1]  # Detect()
-    shapes = imgsz * dataset.shapes / dataset.shapes.max(1, keepdims=True)
-    scale = np.random.uniform(0.9, 1.1, size=(shapes.shape[0], 1))  # augment scale
-    wh = torch.tensor(np.concatenate([l[:, 3:5] * s for s, l in zip(shapes * scale, dataset.labels)])).float()  # wh
-
-    def metric(k):  # compute metric
-        r = wh[:, None] / k[None]
-        x = torch.min(r, 1. / r).min(2)[0]  # ratio metric
-        best = x.max(1)[0]  # best_x
-        aat = (x > 1. / thr).float().sum(1).mean()  # anchors above threshold
-        bpr = (best > 1. / thr).float().mean()  # best possible recall
-        return bpr, aat
-
-    anchors = m.anchor_grid.clone().cpu().view(-1, 2)  # current anchors
-    bpr, aat = metric(anchors)
-    print(f'anchors/target = {aat:.2f}, Best Possible Recall (BPR) = {bpr:.4f}', end='')
-    if bpr < 0.98:  # threshold to recompute
-        print('. Attempting to improve anchors, please wait...')
-        na = m.anchor_grid.numel() // 2  # number of anchors
-        try:
-            anchors = kmean_anchors(dataset, n=na, img_size=imgsz, thr=thr, gen=1000, verbose=False)
-        except Exception as e:
-            print(f'{prefix}ERROR: {e}')
-        new_bpr = metric(anchors)[0]
-        if new_bpr > bpr:  # replace anchors
-            anchors = torch.tensor(anchors, device=m.anchors.device).type_as(m.anchors)
-            m.anchor_grid[:] = anchors.clone().view_as(m.anchor_grid)  # for inference
-            check_anchor_order(m)
-            m.anchors[:] = anchors.clone().view_as(m.anchors) / m.stride.to(m.anchors.device).view(-1, 1, 1)  # loss
-            print(f'{prefix}New anchors saved to model. Update model *.yaml to use these anchors in the future.')
-        else:
-            print(f'{prefix}Original anchors better than new anchors. Proceeding with original anchors.')
-    print('')  # newline
     
 def colorstr(*input):
     # Colors a string https://en.wikipedia.org/wiki/ANSI_escape_code, i.e.  colorstr('blue', 'hello world')

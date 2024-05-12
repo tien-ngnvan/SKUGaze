@@ -7,19 +7,16 @@ from copy import deepcopy
 
 from backbones.yolov7.models.yolo import Detect, IDetect
 from backbones.yolov7.utils.autoanchor import check_anchor_order
-from backbones.yolov7.utils.torch_utils import (
-    time_synchronized, 
-    fuse_conv_and_bn, 
-    model_info, 
-    scale_img, 
-    initialize_weights,
-    copy_attr
-)
+from backbones.yolov7.utils.torch_utils import time_synchronized, fuse_conv_and_bn, model_info, \
+    scale_img, initialize_weights, copy_attr
+from backbones.yolov7.utils.general import make_divisible
+from backbones.yolov7.models.common import *
+from backbones.yolov7.models.experimental import MixConv2d, CrossConv, Conv, DWConv
 
-from yoloxyz.multitasks.models.yolov7.common import *
-from yoloxyz.multitasks.models.yolov7.experimental import *
+from yoloxyz.multitasks.models.yolov7.experimental import GhostBottleneck, GhostConv
 from yoloxyz.multitasks.heads.head_layer import IDetectBody, IDetectHead, IKeypoint
-
+from yoloxyz.multitasks.models.yolov7.common import NMS, SPP, Focus, ConvFocus, BottleneckCSP, C3, C3TR, StemBlock, \
+    BottleneckCSPF, BottleneckCSP2, SPPCSP, SPPFCSPC, conv_bn_relu_maxpool, Shuffle_Block, DWConvblock, ADD
 
 try:
     import thop  # for FLOPS computation

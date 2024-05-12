@@ -4,7 +4,6 @@ import os
 import cv2
 import argparse
 from pathlib import Path
-from threading import Thread
 
 import numpy as np
 import torch
