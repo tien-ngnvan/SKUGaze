@@ -51,6 +51,7 @@ from multitasks.utils.plots import plot_labels, plot_images
 
 import yoloxyz.test as test # import test.py to get mAP after each epoch
 
+import torch.multiprocessing as mp
 
 logger = logging.getLogger(__name__)
 
@@ -113,19 +114,20 @@ def train(hyp, opt, device, tb_writer=None):
     assert len(names) == nc, '%g names found for nc=%g dataset in %s' % (len(names), nc, opt.data)  # check
 
     # Model
+    headlayers = ['Detect', 'IDetect', 'IKeypoint', 'IDetectHead', 'IDetectBody'] # Define a list of Head layer
     pretrained = weights.endswith('.pt')
     if pretrained:
         with torch_distributed_zero_first(rank):
             attempt_download(weights)  # download if not found locally
         ckpt = torch.load(weights, map_location=device)  # load checkpoint
-        model = Model(opt.cfg or ckpt['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
+        model = Model(opt.cfg or ckpt['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors'), headlayers=headlayers).to(device)  # create
         exclude = ['anchor'] if (opt.cfg or hyp.get('anchors')) and not opt.resume else []  # exclude keys
         state_dict = ckpt['model'].float().state_dict()  # to FP32
         state_dict = intersect_dicts(state_dict, model.state_dict(), exclude=exclude)  # intersect
         model.load_state_dict(state_dict, strict=False)  # load
         logger.info('\n\nTransferred %g/%g items from %s\n\n' % (len(state_dict), len(model.state_dict()), weights))  # report
     else:
-        model = Model(opt.cfg, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
+        model = Model(opt.cfg, ch=3, nc=nc, anchors=hyp.get('anchors'), headlayers=headlayers).to(device)  # create
     with torch_distributed_zero_first(rank):
         check_dataset(data_dict)  # check
     train_path = data_dict['train']
@@ -135,11 +137,8 @@ def train(hyp, opt, device, tb_writer=None):
     if freeze is not None:
         _freeze = []
         for _sub_layer in freeze.split(','):
-            if _sub_layer.find('-') > 0:
-                start, end = _sub_layer.split('-')
-                _freeze.extend([f'model.{x}.' for x in range(int(start), int(end))])  # layers to freeze
-            else: # frozen from layer to layer
-                _freeze.extend([f'model.{x}.' for x in range(int(_sub_layer))])  # layers to freeze
+            start, end = _sub_layer.split('-')
+            _freeze.extend([f'model.{x}.' for x in range(int(start), int(end))])  # layers to freeze
         for k, v in model.named_parameters():
             v.requires_grad = True  # train all layers
             if any(x in k for x in _freeze):
@@ -157,11 +156,11 @@ def train(hyp, opt, device, tb_writer=None):
     # DP mode
     # if cuda and rank == -1 and torch.cuda.device_count() > 1:
     #     model = torch.nn.DataParallel(model)
-        
+    
     # DDP mode
     if cuda and rank != -1:
         if opt.use_fsdp:
-            print("-----------Training with FSDP-----------")
+            print("\n-----------Training with FSDP-----------")
             
             if opt.sharding == 'full': # zero 3
                 sharding = ShardingStrategy.FULL_SHARD
@@ -185,11 +184,16 @@ def train(hyp, opt, device, tb_writer=None):
                         #  backward_prefetch = BackwardPrefetch.BACKWARD_PRE
                 )
         else:
-            print("-----------Training with DDP-----------")
+            print("\n-----------Training with DDP-----------")
             model = DDP(model, device_ids=[opt.local_rank], output_device=opt.local_rank,
                         # nn.MultiheadAttention incompatibility with DDP https://github.com/pytorch/pytorch/issues/26698
                         find_unused_parameters=any(isinstance(layer, nn.MultiheadAttention) for layer in model.modules()))
-     
+
+            # SyncBatchNorm
+            if opt.sync_bn and cuda and rank != -1:
+                model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).to(device)
+                logger.info('Using SyncBatchNorm()')
+        
     # Optimizer
     nbs = 64  # nominal batch size
     accumulate = max(round(nbs / total_batch_size), 1)  # accumulate loss before optimizing
@@ -244,36 +248,31 @@ def train(hyp, opt, device, tb_writer=None):
 
     # Resume
     start_epoch, best_fitness = 0, 0.0
-    # if pretrained:
-    #     # Optimizer
-    #     if ckpt['optimizer'] is not None:
-    #         optimizer.load_state_dict(ckpt['optimizer'])
-    #         best_fitness = ckpt['best_fitness']
+    if pretrained:
+        # Optimizer
+        if ckpt['optimizer'] is not None:
+            optimizer.load_state_dict(ckpt['optimizer'])
+            best_fitness = ckpt['best_fitness']
 
-    #     # EMA
-    #     if ema and ckpt.get('ema'):
-    #         ema.ema.load_state_dict(ckpt['ema'].float().state_dict())
-    #         ema.updates = ckpt['updates']
+        # EMA
+        if ema and ckpt.get('ema'):
+            ema.ema.load_state_dict(ckpt['ema'].float().state_dict())
+            ema.updates = ckpt['updates']
 
-    #     # Results
-    #     if ckpt.get('training_results') is not None:
-    #         results_file.write_text(ckpt['training_results'])  # write results.txt
+        # Results
+        if ckpt.get('training_results') is not None:
+            results_file.write_text(ckpt['training_results'])  # write results.txt
 
-    #     # Epochs
-    #     start_epoch = ckpt['epoch'] + 1
-    #     if opt.resume:
-    #         assert start_epoch > 0, '%s training to %g epochs is finished, nothing to resume.' % (weights, epochs)
-    #     if epochs < start_epoch:
-    #         logger.info('%s has been trained for %g epochs. Fine-tuning for %g additional epochs.' %
-    #                     (weights, ckpt['epoch'], epochs))
-    #         epochs += ckpt['epoch']  # finetune additional epochs
+        # Epochs
+        start_epoch = ckpt['epoch'] + 1
+        if opt.resume:
+            assert start_epoch > 0, '%s training to %g epochs is finished, nothing to resume.' % (weights, epochs)
+        if epochs < start_epoch:
+            logger.info('%s has been trained for %g epochs. Fine-tuning for %g additional epochs.' %
+                        (weights, ckpt['epoch'], epochs))
+            epochs += ckpt['epoch']  # finetune additional epochs
 
-    #     del ckpt, state_dict
-
-    # SyncBatchNorm
-    if opt.sync_bn and cuda and rank != -1:
-        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).to(device)
-        logger.info('Using SyncBatchNorm()')
+        del ckpt, state_dict
 
     # Trainloader
     dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt,
@@ -282,7 +281,7 @@ def train(hyp, opt, device, tb_writer=None):
                                             image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '), kpt_label=kpt_label, multiloss=multilosses)
     mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # max label class
 
-    nb = len(dataloader)  # number of batches
+
     #assert mlc < nc, 'Label class %g exceeds nc=%g in %s. Possible class labels are 0-%g' % (mlc, nc, opt.data, nc - 1)
 
     # Process 0
@@ -321,13 +320,12 @@ def train(hyp, opt, device, tb_writer=None):
     model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device) * nc  # attach class weights
     model.names = names
     
-    
     # init loss function
     if multilosses:
         loss_fn = {
-            'IKeypoint' : ComputeLoss(model, kpt_label=kpt_label),
-            'IDetectHead' : ComputeLoss(model),
-            'IDetectBody' : ComputeLoss(model)
+            'IKeypoint' : ComputeLoss(model, kpt_label=kpt_label, detect_layer='IKeypoint'),
+            'IDetectHead' : ComputeLoss(model, detect_layer='IDetectHead'),
+            'IDetectBody' : ComputeLoss(model, detect_layer='IDetectBody')
         }
     else:
         loss_fn = {
@@ -336,6 +334,7 @@ def train(hyp, opt, device, tb_writer=None):
 
     # Start training
     t0 = time.time()
+    nb = len(dataloader)  # number of batches
     if warmup:
         nw = max(round(hyp['warmup_epochs'] * nb), 1000)  # number of warmup iterations, max(3 epochs, 1k iterations)
     # nw = min(nw, (epochs - start_epoch) / 2 * nb)  # limit warmup to < 1/2 of training
@@ -410,7 +409,6 @@ def train(hyp, opt, device, tb_writer=None):
                 with amp.autocast(enabled=cuda):
                     model_outputs = model(imgs)  # forward
                 
-            # if don't use multiloss, auto detect last layer and compute_loss
             _loss, _loss_item = [], []
             for name, _loss_fn in loss_fn.items():
                 _ls, _ls_items = _loss_fn(model_outputs[name], targets[name].to(device))
@@ -444,7 +442,7 @@ def train(hyp, opt, device, tb_writer=None):
                             ema.update(cpu_state)
                         del cpu_state
                 else:
-                    if rank in [-1, 0] and ema:
+                    if ema:
                         ema.update(model)
                     
             # Print
@@ -473,10 +471,10 @@ def train(hyp, opt, device, tb_writer=None):
                 elif plots and ni == 10 and wandb_logger.wandb:
                     wandb_logger.log({"Mosaics": [wandb_logger.wandb.Image(str(x), caption=x.name) for x in
                                                   save_dir.glob('train*.jpg') if x.exists()]})
-
             # end batch ------------------------------------------------------------------------------------------------
-        
-                    
+
+            print('\nDebug: -----', rank)
+            
         # end epoch ----------------------------------------------------------------------------------------------------
 
         # Scheduler

@@ -97,19 +97,20 @@ def train(hyp, opt, device, tb_writer=None):
     assert len(names) == nc, '%g names found for nc=%g dataset in %s' % (len(names), nc, opt.data)  # check
 
     # Model
+    headlayers = ['Detect', 'IDetect', 'IKeypoint', 'IDetectHead', 'IDetectBody'] # Define a list of Head layer
     pretrained = weights.endswith('.pt')
     if pretrained:
         with torch_distributed_zero_first(rank):
             attempt_download(weights)  # download if not found locally
         ckpt = torch.load(weights, map_location=device)  # load checkpoint
-        model = Model(opt.cfg or ckpt['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
+        model = Model(opt.cfg or ckpt['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors'), headlayers=headlayers).to(device)  # create
         exclude = ['anchor'] if (opt.cfg or hyp.get('anchors')) and not opt.resume else []  # exclude keys
         state_dict = ckpt['model'].float().state_dict()  # to FP32
         state_dict = intersect_dicts(state_dict, model.state_dict(), exclude=exclude)  # intersect
         model.load_state_dict(state_dict, strict=False)  # load
         logger.info('\n\nTransferred %g/%g items from %s\n\n' % (len(state_dict), len(model.state_dict()), weights))  # report
     else:
-        model = Model(opt.cfg, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
+        model = Model(opt.cfg, ch=3, nc=nc, anchors=hyp.get('anchors'), headlayers=headlayers).to(device)  # create
     with torch_distributed_zero_first(rank):
         check_dataset(data_dict)  # check
     train_path = data_dict['train']
@@ -119,11 +120,8 @@ def train(hyp, opt, device, tb_writer=None):
     if freeze is not None:
         _freeze = []
         for _sub_layer in freeze.split(','):
-            if _sub_layer.find('-') > 0:
                 start, end = _sub_layer.split('-')
                 _freeze.extend([f'model.{x}.' for x in range(int(start), int(end))])  # layers to freeze
-            else: # frozen from layer to layer
-                _freeze.extend([f'model.{x}.' for x in range(int(_sub_layer))])  # layers to freeze
         for k, v in model.named_parameters():
             v.requires_grad = True  # train all layers
             if any(x in k for x in _freeze):
@@ -285,13 +283,13 @@ def train(hyp, opt, device, tb_writer=None):
     # init loss function
     if multilosses:
         loss_fn = {
-            'IKeypoint' : ComputeLoss(model, kpt_label=kpt_label),
-            'IDetectHead' : ComputeLoss(model),
-            'IDetectBody' : ComputeLoss(model)
+            'IKeypoint' : ComputeLoss(model, kpt_label=kpt_label, detect_layer='IKeypoint'),
+            'IDetectHead' : ComputeLoss(model, detect_layer='IDetectHead'),
+            'IDetectBody' : ComputeLoss(model, detect_layer='IDetectBody')
         }
     else:
         loss_fn = {
-            'IDetect' : ComputeLoss(model) # Default
+            'IDetect' : ComputeLoss(model, detect_layer='IDetect') # Default
         }
         
     logger.info(f'Image sizes {imgsz} train, {imgsz_test} test\n'
@@ -554,7 +552,7 @@ if __name__ == '__main__':
     parser.add_argument('--single-cls', action='store_true', help='train multi-class data as single-class')
     parser.add_argument('--adam', action='store_true', help='use torch.optim.Adam() optimizer')
     parser.add_argument('--sync-bn', action='store_true', help='use SyncBatchNorm, only available in DDP mode')
-    parser.add_argument('--local_rank', type=int, default=-1, help='DDP parameter, do not modify')
+    parser.add_argument('--local_rank', '--local-rank', type=int, default=-1, help='DDP parameter, do not modify')
     parser.add_argument('--workers', type=int, default=8, help='maximum number of dataloader workers')
     parser.add_argument('--project', default='runs/train', help='save to project/name')
     parser.add_argument('--entity', default=None, help='W&B entity')

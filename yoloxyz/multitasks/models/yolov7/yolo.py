@@ -14,7 +14,7 @@ from backbones.yolov7.models.common import *
 from backbones.yolov7.models.experimental import MixConv2d, CrossConv, Conv, DWConv
 
 from yoloxyz.multitasks.models.yolov7.experimental import GhostBottleneck, GhostConv
-from yoloxyz.multitasks.heads.head_layer import IDetectBody, IDetectHead, IKeypoint
+from yoloxyz.multitasks.heads.head_layer import IDetectBody, IDetectHead, IKeypoint, HeadLayers
 from yoloxyz.multitasks.models.yolov7.common import NMS, SPP, Focus, ConvFocus, BottleneckCSP, C3, C3TR, StemBlock, \
     BottleneckCSPF, BottleneckCSP2, SPPCSP, SPPFCSPC, conv_bn_relu_maxpool, Shuffle_Block, DWConvblock, ADD
 
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 class ModelV7(nn.Module):
-    def __init__(self, cfg='yolov5s.yaml', ch=3, nc=None, anchors=None):  # model, input channels, number of classes
+    def __init__(self, cfg='yolov5s.yaml', ch=3, nc=None, anchors=None, headlayers=None):  # model, input channels, number of classes
         super(ModelV7, self).__init__()
         if isinstance(cfg, dict):
             self.yaml = cfg  # model dict
@@ -37,6 +37,9 @@ class ModelV7(nn.Module):
             self.yaml_file = Path(cfg).name
             with open(cfg) as f:
                 self.yaml = yaml.safe_load(f)  # model dict
+                
+        # Format Ouput Prediction   
+        self.headlayers = HeadLayers(headlayers)
 
         # Define model
         ch = self.yaml['ch'] = self.yaml.get('ch', ch)  # input channels
@@ -114,17 +117,8 @@ class ModelV7(nn.Module):
 
             x = m(x)  # run
 
-            if isinstance(m, IKeypoint):
-                model_outputs.update({'IKeypoint' : x})
-
-            if isinstance(m, IDetectHead):
-                model_outputs.update({'IDetectHead' : x})
-
-            if isinstance(m, IDetectBody):
-                model_outputs.update({'IDetectBody' : x})
-                
-            if isinstance(m, IDetect):
-                model_outputs.update({'IDetect' : x})
+            if self.headlayers.check(m):
+                model_outputs.update({self.headlayers.get_name(m): x})
 
             y.append(x if m.i in self.save else None)  # save output
 
