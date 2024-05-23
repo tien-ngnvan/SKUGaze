@@ -4,6 +4,8 @@ import logging
 import math
 import random
 import time
+import torch.distributed
+import torch.distributed.fsdp
 import yaml
 from copy import deepcopy
 from pathlib import Path
@@ -20,6 +22,16 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
+from torch.distributed.fsdp import (
+    FullyShardedDataParallel as FSDP,
+    MixedPrecision,
+    BackwardPrefetch,
+    ShardingStrategy,
+    FullStateDictConfig,
+    StateDictType,
+)
+from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
+from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 
 from backbones.yolov7.utils.autoanchor import check_anchors
 from backbones.yolov7.utils.general import labels_to_class_weights, increment_path, labels_to_image_weights, init_seeds, \
@@ -27,16 +39,19 @@ from backbones.yolov7.utils.general import labels_to_class_weights, increment_pa
     check_requirements, print_mutation, set_logging, one_cycle, colorstr
 from backbones.yolov7.utils.wandb_logging.wandb_utils import WandbLogger, check_wandb_resume
 from backbones.yolov7.utils.google_utils import attempt_download
-from backbones.yolov7.utils.torch_utils import ModelEMA, select_device, intersect_dicts, torch_distributed_zero_first, is_parallel
+from backbones.yolov7.utils.torch_utils import select_device, intersect_dicts, torch_distributed_zero_first, is_parallel
 from backbones.yolov7.utils.plots import plot_results, plot_evolution
 
 from multitasks.models.yolov7.yolo import ModelV7 as Model
 from multitasks.models.yolov7.experimental import attempt_load
 from multitasks.utils.loss import ComputeLoss
 from multitasks.utils.datasets import create_dataloader
+from multitasks.utils.general import ModelEMA
 from multitasks.utils.plots import plot_labels, plot_images
 
 import yoloxyz.test as test # import test.py to get mAP after each epoch
+
+import torch.multiprocessing as mp
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +69,8 @@ def get_average_tensor(tensor_list):
     average_tensor = summed_tensor / len(tensor_list)
 
     return average_tensor
+
+
 
 def train(hyp, opt, device, tb_writer=None):
     logger.info(colorstr('hyperparameters: ') + ', '.join(f'{k}={v}' for k, v in hyp.items()))
@@ -120,14 +137,63 @@ def train(hyp, opt, device, tb_writer=None):
     if freeze is not None:
         _freeze = []
         for _sub_layer in freeze.split(','):
-                start, end = _sub_layer.split('-')
-                _freeze.extend([f'model.{x}.' for x in range(int(start), int(end))])  # layers to freeze
+            start, end = _sub_layer.split('-')
+            _freeze.extend([f'model.{x}.' for x in range(int(start), int(end))])  # layers to freeze
         for k, v in model.named_parameters():
             v.requires_grad = True  # train all layers
             if any(x in k for x in _freeze):
                 print(f'freezing {k}')
                 v.requires_grad = False
+                
+    # EMA
+    ema = ModelEMA(model) if rank in [-1, 0] else None
+    
+    # Image sizes
+    gs = max(int(model.stride.max()), 32)  # grid size (max stride)
+    nl = model.model[-1].nl  # number of detection layers (used for scaling hyp['obj'])
+    imgsz, imgsz_test = [check_img_size(x, gs) for x in opt.img_size]  # verify imgsz are gs-multiples
 
+    # DP mode
+    # if cuda and rank == -1 and torch.cuda.device_count() > 1:
+    #     model = torch.nn.DataParallel(model)
+    
+    # DDP mode
+    if cuda and rank != -1:
+        if opt.use_fsdp:
+            print("\n-----------Training with FSDP-----------")
+            
+            if opt.sharding == 'full': # zero 3
+                sharding = ShardingStrategy.FULL_SHARD
+            elif opt.sharding == 'grad_op': # zero 2
+                sharding = ShardingStrategy.SHARD_GRAD_OP
+            elif opt.sharding == 'no_shard': # no zero
+                sharding = ShardingStrategy.NO_SHARD
+            
+            fpSixteen = MixedPrecision(
+                param_dtype=torch.float16,
+                # Gradient communication precision.
+                reduce_dtype=torch.float16,
+                # Buffer precision.
+                buffer_dtype=torch.float16,
+            )
+            model = FSDP(model,
+                         mixed_precision=fpSixteen,
+                         sharding_strategy=sharding,
+                         device_id=torch.cuda.current_device(),
+                        #  limit_all_gathers=True,
+                        #  backward_prefetch = BackwardPrefetch.BACKWARD_PRE
+                )
+        else:
+            print("\n-----------Training with DDP-----------")
+            model = DDP(model, device_ids=[opt.local_rank], output_device=opt.local_rank,
+                        # nn.MultiheadAttention incompatibility with DDP https://github.com/pytorch/pytorch/issues/26698
+                        find_unused_parameters=any(isinstance(layer, nn.MultiheadAttention) for layer in model.modules()))
+
+            # SyncBatchNorm
+            if opt.sync_bn and cuda and rank != -1:
+                model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).to(device)
+                logger.info('Using SyncBatchNorm()')
+        
     # Optimizer
     nbs = 64  # nominal batch size
     accumulate = max(round(nbs / total_batch_size), 1)  # accumulate loss before optimizing
@@ -154,15 +220,21 @@ def train(hyp, opt, device, tb_writer=None):
             else:
                 for iv in v.ia:
                     pg0.append(iv.implicit)
-
+                
+    logger.info('Optimizer groups: %g .bias, %g conv.weight, %g other' % (len(pg2), len(pg1), len(pg0)))
+    
+    if opt.use_fsdp:
+        pg0 = model.parameters()
     if opt.adam:
+        print("Use Adam optimizer")
         optimizer = optim.Adam(pg0, lr=hyp['lr0'], betas=(hyp['momentum'], 0.999))  # adjust beta1 to momentum
     else:
+        print("Use SGD optimizer")
         optimizer = optim.SGD(pg0, lr=hyp['lr0'], momentum=hyp['momentum'], nesterov=True)
 
     optimizer.add_param_group({'params': pg1, 'weight_decay': hyp['weight_decay']})  # add pg1 with weight_decay
     optimizer.add_param_group({'params': pg2})  # add pg2 (biases)
-    logger.info('Optimizer groups: %g .bias, %g conv.weight, %g other' % (len(pg2), len(pg1), len(pg0)))
+    
     del pg0, pg1, pg2
 
     # Scheduler https://arxiv.org/pdf/1812.01187.pdf
@@ -173,9 +245,6 @@ def train(hyp, opt, device, tb_writer=None):
         lf = one_cycle(1, hyp['lrf'], epochs)  # cosine 1->hyp['lrf']
     scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
     # plot_lr_scheduler(optimizer, scheduler, epochs)
-
-    # EMA
-    ema = ModelEMA(model) if rank in [-1, 0] else None
 
     # Resume
     start_epoch, best_fitness = 0, 0.0
@@ -205,20 +274,6 @@ def train(hyp, opt, device, tb_writer=None):
 
         del ckpt, state_dict
 
-    # Image sizes
-    gs = max(int(model.stride.max()), 32)  # grid size (max stride)
-    nl = model.model[-1].nl  # number of detection layers (used for scaling hyp['obj'])
-    imgsz, imgsz_test = [check_img_size(x, gs) for x in opt.img_size]  # verify imgsz are gs-multiples
-
-    # DP mode
-    if cuda and rank == -1 and torch.cuda.device_count() > 1:
-        model = torch.nn.DataParallel(model)
-
-    # SyncBatchNorm
-    if opt.sync_bn and cuda and rank != -1:
-        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).to(device)
-        logger.info('Using SyncBatchNorm()')
-
     # Trainloader
     dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt,
                                             hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, rank=rank,
@@ -226,7 +281,7 @@ def train(hyp, opt, device, tb_writer=None):
                                             image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '), kpt_label=kpt_label, multiloss=multilosses)
     mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # max label class
 
-    nb = len(dataloader)  # number of batches
+
     #assert mlc < nc, 'Label class %g exceeds nc=%g in %s. Possible class labels are 0-%g' % (mlc, nc, opt.data, nc - 1)
 
     # Process 0
@@ -250,13 +305,9 @@ def train(hyp, opt, device, tb_writer=None):
             # Anchors
             if not opt.noautoanchor:
                 check_anchors(dataset, model=model, thr=hyp['anchor_t'], imgsz=imgsz)
-            model.half().float()  # pre-reduce anchor precision
-
-    # DDP mode
-    if cuda and rank != -1:
-        model = DDP(model, device_ids=[opt.local_rank], output_device=opt.local_rank,
-                    # nn.MultiheadAttention incompatibility with DDP https://github.com/pytorch/pytorch/issues/26698
-                    find_unused_parameters=any(isinstance(layer, nn.MultiheadAttention) for layer in model.modules()))
+            
+            if not opt.use_fsdp:
+                model.half().float()  # pre-reduce anchor precision
 
     # Model parameters
     hyp['box'] *= 3. / nl  # scale to layers
@@ -268,17 +319,6 @@ def train(hyp, opt, device, tb_writer=None):
     model.gr = 1.0  # iou loss ratio (obj_loss = 1.0 or iou)
     model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device) * nc  # attach class weights
     model.names = names
-
-
-    # Start training
-    t0 = time.time()
-    if warmup:
-        nw = max(round(hyp['warmup_epochs'] * nb), 1000)  # number of warmup iterations, max(3 epochs, 1k iterations)
-    # nw = min(nw, (epochs - start_epoch) / 2 * nb)  # limit warmup to < 1/2 of training
-    maps = np.zeros(nc)  # mAP per class
-    results = (0, 0, 0, 0, 0, 0, 0)  # P, R, mAP@.5, mAP@.5-.95, val_loss(box, obj, cls)
-    scheduler.last_epoch = start_epoch - 1  # do not move
-    scaler = amp.GradScaler(enabled=cuda)
     
     # init loss function
     if multilosses:
@@ -289,8 +329,19 @@ def train(hyp, opt, device, tb_writer=None):
         }
     else:
         loss_fn = {
-            'IDetect' : ComputeLoss(model, detect_layer='IDetect') # Default
+            'IDetect' : ComputeLoss(model) # Default
         }
+
+    # Start training
+    t0 = time.time()
+    nb = len(dataloader)  # number of batches
+    if warmup:
+        nw = max(round(hyp['warmup_epochs'] * nb), 1000)  # number of warmup iterations, max(3 epochs, 1k iterations)
+    # nw = min(nw, (epochs - start_epoch) / 2 * nb)  # limit warmup to < 1/2 of training
+    maps = np.zeros(nc)  # mAP per class
+    results = (0, 0, 0, 0, 0, 0, 0)  # P, R, mAP@.5, mAP@.5-.95, val_loss(box, obj, cls)
+    scheduler.last_epoch = start_epoch - 1  # do not move
+    scaler = ShardedGradScaler() if opt.use_fsdp else amp.GradScaler(enabled=cuda)
         
     logger.info(f'Image sizes {imgsz} train, {imgsz_test} test\n'
                 f'Using {dataloader.num_workers} dataloader workers\n'
@@ -298,7 +349,7 @@ def train(hyp, opt, device, tb_writer=None):
                 f'Starting training for {epochs} epochs...')
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         model.train()
-
+        
         # Update image weights (optional)
         if opt.image_weights:
             # Generate indices
@@ -352,35 +403,48 @@ def train(hyp, opt, device, tb_writer=None):
                     imgs = F.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
 
             # Forward
-            with amp.autocast(enabled=cuda):
-                model_outputs = model(imgs)  # forward
-                # if don't use multiloss, auto detect last layer and compute_loss
+            if opt.use_fsdp:
+                model_outputs = model(imgs)
+            else:
+                with amp.autocast(enabled=cuda):
+                    model_outputs = model(imgs)  # forward
                 
-                _loss, _loss_item = [], []
-                for name, _loss_fn in loss_fn.items():
-                    _ls, _ls_items = _loss_fn(model_outputs[name], targets[name].to(device))
-                    _loss.append(_ls)
-                    _loss_item.append(_ls_items)
+            _loss, _loss_item = [], []
+            for name, _loss_fn in loss_fn.items():
+                _ls, _ls_items = _loss_fn(model_outputs[name], targets[name].to(device))
+                _loss.append(_ls)
+                _loss_item.append(_ls_items)
 
-                loss =  _loss[0] if len(_loss) == 1 else sum(_loss) / len(_loss)
-                loss_items = _loss_item[0] if len(_loss_item) == 1 else get_average_tensor(_loss_item)
- 
-                if rank != -1:
-                    loss *= opt.world_size  # gradient averaged between devices in DDP mode
-                if opt.quad:
-                    loss *= 4.
+            loss =  _loss[0] if len(_loss) == 1 else sum(_loss) / len(_loss)
+            loss_items = _loss_item[0] if len(_loss_item) == 1 else get_average_tensor(_loss_item)
+
+            if rank != -1:
+                loss *= opt.world_size  # gradient averaged between devices in DDP mode
+            if opt.quad:
+                loss *= 4.
 
             # Backward
             scaler.scale(loss).backward()
-
+            
             # Optimize
             if ni % accumulate == 0:
                 scaler.step(optimizer)  # optimizer.step
                 scaler.update()
                 optimizer.zero_grad()
-                if ema:
-                    ema.update(model)
-
+                
+                if opt.use_fsdp:
+                    save_policy = FullStateDictConfig(offload_to_cpu=False, rank0_only=True)
+                    with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
+                        cpu_state = model.state_dict()
+                    # save model
+                    if rank in [-1, 0]:
+                        if ema:
+                            ema.update(cpu_state)
+                        del cpu_state
+                else:
+                    if ema:
+                        ema.update(model)
+                    
             # Print
             if rank in [-1, 0]:
                 mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
@@ -407,8 +471,10 @@ def train(hyp, opt, device, tb_writer=None):
                 elif plots and ni == 10 and wandb_logger.wandb:
                     wandb_logger.log({"Mosaics": [wandb_logger.wandb.Image(str(x), caption=x.name) for x in
                                                   save_dir.glob('train*.jpg') if x.exists()]})
-
             # end batch ------------------------------------------------------------------------------------------------
+
+            print('\nDebug: -----', rank)
+            
         # end epoch ----------------------------------------------------------------------------------------------------
 
         # Scheduler
@@ -461,12 +527,19 @@ def train(hyp, opt, device, tb_writer=None):
                 best_fitness = fi
             wandb_logger.end_epoch(best_result=best_fitness == fi)
 
+            if 'FullyShardedDataParallel' in str(type(model)) or opt.use_fsdp:
+                tmp_model = model._fsdp_wrapped_module
+            elif is_parallel(model): # DDP
+                tmp_model = model.module
+            else:
+                tmp_model = model
+
             # Save model
             if (not opt.nosave) or (final_epoch and not opt.evolve):  # if save
                 ckpt = {'epoch': epoch,
                         'best_fitness': best_fitness,
                         'training_results': results_file.read_text(),
-                        'model': deepcopy(model.module if is_parallel(model) else model).half(),
+                        'model': deepcopy(tmp_model).half(),
                         'ema': deepcopy(ema.ema).half(),
                         'updates': ema.updates,
                         'optimizer': optimizer.state_dict(),
@@ -567,9 +640,13 @@ if __name__ == '__main__':
     parser.add_argument('--artifact_alias', type=str, default="latest", help='version of dataset artifact to be used')
     parser.add_argument('--kpt-label', type=int, default=0, help='number of keypoints')
     parser.add_argument('--freeze', type=str, default=None, help='frozen number of layer')
-    parser.add_argument('--multilosses', type=bool, default=False, help="Multihead loss")
-    parser.add_argument('--detect-layer', type=str, default='IDetect', help="Calculated loss")
-    parser.add_argument('--warmup', type=bool, default=False, help="Warmup epochs")
+    parser.add_argument('--multilosses', type=bool, default=False, help='Multihead loss')
+    parser.add_argument('--detect-layer', type=str, default='IDetect', help='Calculated loss')
+    parser.add_argument('--warmup', action='store_true', help='Warmup epochs')
+    parser.add_argument('--use_fsdp', action='store_true', help='Turn on Fully shard data distributes')
+    parser.add_argument('--sharding', type=str, default='grad_op', help='FSDP current support full is zero 3; grad_op is zero 2; no_shard is no sharding')
+    parser.add_argument('--cpu-offload', action='store_true', help='using cpu offload')
+    
     opt = parser.parse_args()
     
     print("\nArguments: ", opt, "\n")
@@ -581,6 +658,7 @@ if __name__ == '__main__':
     if opt.global_rank in [-1, 0]:
         check_git_status()
         check_requirements(exclude=('pycocotools', 'thop'))
+        
     # Resume
     wandb_run = check_wandb_resume(opt)
     if opt.resume and not wandb_run:  # resume an interrupted run
@@ -603,6 +681,7 @@ if __name__ == '__main__':
     # DDP mode
     opt.total_batch_size = opt.batch_size
     device = select_device(opt.device, batch_size=opt.batch_size)
+
     if opt.local_rank != -1:
         assert torch.cuda.device_count() > opt.local_rank
         torch.cuda.set_device(opt.local_rank)

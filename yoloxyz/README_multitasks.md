@@ -71,3 +71,41 @@ python -m torch.distributed.launch --nproc_per_node 2 --master_port 9527 yoloxyz
   --multilosses True \
   --detect-layer 'IKeypoint'
 ```
+
+3. [Fully Sharded Data Parallel (FSDP)](https://pytorch.org/tutorials/intermediate/FSDP_tutorial.html)
+- In DistributedDataParallel, (DDP) training, each process/ worker owns a replica of the model and processes a batch of data, finally it uses all-reduce to sum up gradients over different workers. In DDP the model weights and optimizer states are replicated across all workers. FSDP is a type of data parallelism that shards model parameters, optimizer states and gradients across DDP ranks.
+
+- When training with FSDP, the GPU memory footprint is smaller than when training with DDP across all workers. This makes the training of some very large models feasible by allowing larger models or batch sizes to fit on device. This comes with the cost of increased communication volume. The communication overhead is reduced by internal optimizations like overlapping communication and computation.
+
+- For this reason, Yoloxyz integration [FSDP](https://pytorch.org/docs/stable/fsdp.html#torch.distributed.fsdp.FullyShardedDataParallel) optimize time and training cost which several features comparable [Deepspeed](https://www.microsoft.com/en-us/research/blog/zero-deepspeed-new-system-optimizations-enable-training-models-with-over-100-billion-parameters/) as
+
+|   | FSDP | Deepspeed |
+| ------------- | ------------- | ------------- |
+|  FSDP's version of DDP |  no_shard | _  |
+| Sharding both the optimizer state and gradients  | grad_op  | ZeRO2  |
+| Sharding optimizer state, gradients, and model parameters  | full  | ZeRO3 |
+| Offloads the optimizer memory and computation from the GPU->CPU | full + cpu_offload | ZeRO3 + offload |
+
+
+- Easy running with several lines
+```
+python -m torch.distributed.launch --nproc_per_node 2 --master_port 9527 yoloxyz/train_accelerate.py \
+  --epochs 100 \
+  --workers 8 \
+  --device 0,1 \
+  --batch-size 128 \
+  --data yoloxyz/multitasks/cfg/data/widerface.yaml \
+  --img 640 640 \
+  --cfg yoloxyz/multitasks/cfg/training/yolov7-tiny-multitask.yaml \
+  --name yolov7-tiny-pretrain \
+  --hyp yoloxyz/multitasks/cfg/hyp/hyp.yolov7.tiny.yaml \
+  --weight weights/yolov7-tiny.pt \
+  --kpt-label 5 \
+  --multilosses True \
+  --detect-layer 'IKeypoint' \
+  --warmup \
+  --use_fsdp \
+  --sharding 'no_shard' \
+  --cpu-offload False
+```
+(*) As any [Accelerator](https://github.com/huggingface/accelerate) , FSDP sensitive with `learning rate` easy get [NaN](https://github.com/huggingface/accelerate/issues/2402) loss in training when run with MixedPrecision (FP16, BF16,...), we recommend you should start with `1e-3` or `1e-4`.

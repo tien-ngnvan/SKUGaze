@@ -6,6 +6,16 @@ from yoloxyz.backbones.yolov7.models.yolo import IDetect
 from yoloxyz.multitasks.models.yolov7.common import ImplicitA, ImplicitM, DWConv, Conv
 
 
+class HeadLayers:
+    def __init__(self, list):
+        self.list = list
+        
+    def get_name(self, x):
+        return x.__class__.__name__
+    
+    def check(self, x):
+        return True if self.get_name(x) in self.list else False
+    
 
 class IKeypoint(nn.Module):
     stride = None  # strides computed during build
