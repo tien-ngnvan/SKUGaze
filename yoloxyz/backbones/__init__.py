@@ -1,2 +1,2 @@
 import sys
-sys.path.append('yoloxyz/backbones/yolov7')
+sys.path.append('yoloxyz\backbones\yolov7')

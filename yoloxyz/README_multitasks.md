@@ -93,7 +93,7 @@ python -m torch.distributed.launch --nproc_per_node 2 --master_port 9527 yoloxyz
   --epochs 100 \
   --workers 8 \
   --device 0,1 \
-  --batch-size 128 \
+  --batch-size 64 \
   --data yoloxyz/multitasks/cfg/data/widerface.yaml \
   --img 640 640 \
   --cfg yoloxyz/multitasks/cfg/training/yolov7-tiny-multitask.yaml \
@@ -105,7 +105,37 @@ python -m torch.distributed.launch --nproc_per_node 2 --master_port 9527 yoloxyz
   --detect-layer 'IKeypoint' \
   --warmup \
   --use_fsdp \
-  --sharding 'no_shard' \
-  --cpu-offload False
+  --adam \
+  --sharding 'no_shard'
 ```
 (*) As any [Accelerator](https://github.com/huggingface/accelerate) , FSDP sensitive with `learning rate` easy get [NaN](https://github.com/huggingface/accelerate/issues/2402) loss in training when run with MixedPrecision (FP16, BF16,...), we recommend you should start with `1e-3` or `1e-4`.
+
+## Pytorch Inference
+```
+python yoloxyz/detect.py \
+    --weights weights/best.pt \
+    --device 0 \
+    --source 'samples' \
+    --detect-layer face \
+    --kpt-label 5
+```
+
+## ONNX 
+### ONNX export
+```
+python yoloxyz/multitasks/onnx_sp/onnx_export.py \
+  --weights weights/best.pt \
+  --img-size 640 --batch-size 10 \
+  --dynamic-batch --grid --end2end --max-wh 640 --topk-all 100 \
+  --iou-thres 0.5 --conf-thres 0.2 --device 'cpu' --simplify --cleanup
+
+```
+### ONNX Inference
+```
+python yoloxyz/multitasks/onnx_sp/onnx_inference.py \
+  --model-path 'weights/best.onnx' \
+  --img-path 'samples' \
+  --dst-path 'predicts/output' \
+  --get-layer 'face' \
+  --face-thres 0.78
+```
