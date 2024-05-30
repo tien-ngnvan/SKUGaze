@@ -140,7 +140,7 @@ class ComputeLoss:
                 break
         self.balance = {3: [4.0, 1.0, 0.4]}.get(det.nl, [4.0, 1.0, 0.25, 0.06, .02])  # P3-P7
         self.ssi = list(det.stride).index(16) if autobalance else 0  # stride 16 index
-        self.BCEcls, self.BCEobj, self.gr, self.hyp, self.autobalance = BCEcls, BCEobj, model.gr, h, autobalance
+        self.BCEcls, self.BCEobj, self.gr, self.hyp, self.autobalance, self.iou_loss = BCEcls, BCEobj, model.gr, h, autobalance, model.iou_loss
         for k in 'na', 'nc', 'nl', 'anchors', 'nkpt':
             if hasattr(det, k):
                 setattr(self, k, getattr(det, k))
@@ -163,7 +163,10 @@ class ComputeLoss:
                 pxy = ps[:, :2].sigmoid() * 2. - 0.5
                 pwh = (ps[:, 2:4].sigmoid() * 2) ** 2 * anchors[i]
                 pbox = torch.cat((pxy, pwh), 1)  # predicted box
-                iou = bbox_iou(pbox.T, tbox[i], x1y1x2y2=False, EIoU=True)  # iou(prediction, target)
+                if self.iou_loss == 'EIoU':
+                    iou = bbox_iou(pbox.T, tbox[i], x1y1x2y2=False, EIoU=True)  # iou(prediction, target)
+                else:
+                    iou = bbox_iou(pbox.T, tbox[i], x1y1x2y2=False, DIoU=True) 
                 lbox += (1.0 - iou).mean()  # iou loss
                 if self.kpt_label:
                     #Direct kpt prediction

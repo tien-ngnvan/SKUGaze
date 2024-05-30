@@ -319,6 +319,7 @@ def train(hyp, opt, device, tb_writer=None):
     model.gr = 1.0  # iou loss ratio (obj_loss = 1.0 or iou)
     model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device) * nc  # attach class weights
     model.names = names
+    model.iou_loss = opt.iou_loss
     
     # init loss function
     if multilosses:
@@ -329,7 +330,7 @@ def train(hyp, opt, device, tb_writer=None):
         }
     else:
         loss_fn = {
-            'IDetect' : ComputeLoss(model) # Default
+            'IDetect' : ComputeLoss(model, detect_layer='IDetect') # Default
         }
 
     # Start training
@@ -622,6 +623,7 @@ if __name__ == '__main__':
     parser.add_argument('--multi-scale', action='store_true', help='vary img-size +/- 50%%')
     parser.add_argument('--single-cls', action='store_true', help='train multi-class data as single-class')
     parser.add_argument('--adam', action='store_true', help='use torch.optim.Adam() optimizer')
+    parser.add_argument('--iou-loss', type=str, default='EIoU', help= 'use iou_loss (EIoU default) for loss bounding box')
     parser.add_argument('--sync-bn', action='store_true', help='use SyncBatchNorm, only available in DDP mode')
     parser.add_argument('--local_rank', '--local-rank', type=int, default=-1, help='DDP parameter, do not modify')
     parser.add_argument('--workers', type=int, default=8, help='maximum number of dataloader workers')
