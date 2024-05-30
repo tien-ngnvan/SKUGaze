@@ -472,8 +472,6 @@ def train(hyp, opt, device, tb_writer=None):
                     wandb_logger.log({"Mosaics": [wandb_logger.wandb.Image(str(x), caption=x.name) for x in
                                                   save_dir.glob('train*.jpg') if x.exists()]})
             # end batch ------------------------------------------------------------------------------------------------
-
-            print('\nDebug: -----', rank)
             
         # end epoch ----------------------------------------------------------------------------------------------------
 
