@@ -49,6 +49,7 @@ python yoloxyz/train.py \
   --weight weights/yolov7-tiny.pt \
   --sync-bn \
   --kpt-label 5 \
+  --iou-loss EIoU \
   --multilosses True \
   --detect-layer 'IKeypoint'
 ```
@@ -68,6 +69,7 @@ python -m torch.distributed.launch --nproc_per_node 2 --master_port 9527 yoloxyz
   --weight weights/yolov7-tiny.pt \
   --sync-bn \
   --kpt-label 5 \
+  --iou-loss EIoU \
   --multilosses True \
   --detect-layer 'IKeypoint'
 ```
@@ -101,6 +103,7 @@ python -m torch.distributed.launch --nproc_per_node 2 --master_port 9527 yoloxyz
   --hyp yoloxyz/multitasks/cfg/hyp/hyp.yolov7.tiny.yaml \
   --weight weights/yolov7-tiny.pt \
   --kpt-label 5 \
+  --iou-loss EIoU \
   --multilosses True \
   --detect-layer 'IKeypoint' \
   --warmup \
