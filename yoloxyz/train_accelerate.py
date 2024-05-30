@@ -330,7 +330,7 @@ def train(hyp, opt, device, tb_writer=None):
         }
     else:
         loss_fn = {
-            'IDetect' : ComputeLoss(model) # Default
+            'IDetect' : ComputeLoss(model, detect_layer='IDetect') # Default
         }
 
     # Start training
