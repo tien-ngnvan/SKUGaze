@@ -41,7 +41,7 @@ class IKeypoint(nn.Module):
 
         self.ia = nn.ModuleList(ImplicitA(2 * x) for x in ch[1:])
         self.im = nn.ModuleList(ImplicitM(self.no_det * self.na) for _ in ch[1:])
-        self.pIdetect = nn.Conv2d(54, 128, 1)
+        self.pIdetect = nn.Conv2d(9 * self.no_det, 128, 1)
         if self.nkpt is not None:
             if self.dw_conv_kpt: #keypoint head is slightly more complex
                 self.m_kpt = nn.ModuleList(
@@ -69,7 +69,7 @@ class IKeypoint(nn.Module):
         for i in range(1, len(x_idetect)):
             concat = torch.cat((temp, x_idetect[i]), axis = 1)
             temp = F.interpolate(concat, scale_factor=(2, 2, 1), mode='trilinear', align_corners=False)
-        bs, nf, ny, nx, nc_  = concat.shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
+        bs, nf, ny, nx, nc_  = concat.shape 
         concat = concat.view(bs, nf * nc_, ny, nx)
         concat = self.pIdetect(concat)
 
