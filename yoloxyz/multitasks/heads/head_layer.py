@@ -37,11 +37,15 @@ class IKeypoint(nn.Module):
         a = torch.tensor(anchors).float().view(self.nl, -1, 2)
         self.register_buffer('anchors', a)  # shape(nl,na,2)
         self.register_buffer('anchor_grid', a.clone().view(self.nl, 1, -1, 1, 1, 2))  # shape(nl,1,na,1,1,2)
-        self.m = nn.ModuleList(nn.Conv2d(2 * x, self.no_det * self.na, 1) for x in ch[1:])  # output conv 
+        temp = 256
+        for i in range(1, len(ch)):
+            ch[i] = ch[i] + temp
+            temp = ch[i]
+        self.m = nn.ModuleList(nn.Conv2d(x, self.no_det * self.na, 1) for x in ch[1:])  # output conv 
 
-        self.ia = nn.ModuleList(ImplicitA(2 * x) for x in ch[1:])
+        self.ia = nn.ModuleList(ImplicitA(x) for x in ch[1:])
         self.im = nn.ModuleList(ImplicitM(self.no_det * self.na) for _ in ch[1:])
-        self.pIdetect = nn.Conv2d(9 * self.no_det, 128, 1)
+        self.pIdetect = nn.Conv2d(self.na * self.nl * self.no_det, 256, 1)
         if self.nkpt is not None:
             if self.dw_conv_kpt: #keypoint head is slightly more complex
                 self.m_kpt = nn.ModuleList(
@@ -64,21 +68,21 @@ class IKeypoint(nn.Module):
             x_idetect = x[0]
         else:
             x_idetect = x[0][1]
-        x_idetect = x_idetect[::-1]
+        x_idetect = x_idetect[::-1] #(bs, 3, nx, ny, 6)
         temp = F.interpolate(x_idetect[0], scale_factor=(2, 2, 1), mode='trilinear', align_corners=False)
         for i in range(1, len(x_idetect)):
             concat = torch.cat((temp, x_idetect[i]), axis = 1)
             temp = F.interpolate(concat, scale_factor=(2, 2, 1), mode='trilinear', align_corners=False)
         bs, nf, ny, nx, nc_  = concat.shape 
-        concat = concat.view(bs, nf * nc_, ny, nx)
-        concat = self.pIdetect(concat)
+        concat = concat.view(bs, nf * nc_, ny, nx) #(bs, na*nl*nc, nx, ny) 
+        concat = self.pIdetect(concat) # (bs, 256, nx, ny)
 
         temp = concat
         for i in range(1, len(x)):
-            concat = torch.cat((temp, x[i]), 1)
+            concat = torch.cat((temp, x[i]), 1) 
             x_new.append(concat)
             temp = F.interpolate(concat, scale_factor=(0.5, 0.5), mode='bilinear', align_corners=False)
-        
+        #[(bs, 512, 160, 160), (bs, 1024, 80, 80), (bs, 1792, 40, 40), (bs, 2816, 20, 20)]
         if self.export:
             for i in range(self.nl):
                 if self.nkpt is None or self.nkpt==0:
