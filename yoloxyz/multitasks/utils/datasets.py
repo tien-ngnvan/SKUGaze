@@ -682,8 +682,9 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
             l[:, 0] = i  # add target image index for build_targets()
 
         label = torch.cat(label, 0)
+        face_label = label[label[:,1] == 0]
         
-        return torch.stack(img, 0), {'IDetect':label}, path, shapes
+        return torch.stack(img, 0), {'IDetect':label, 'IKeypoint':face_label}, path, shapes
         
     @staticmethod
     def multi_collate_fn(batch):

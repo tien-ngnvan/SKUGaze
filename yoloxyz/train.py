@@ -86,6 +86,7 @@ def train(hyp, opt, device, tb_writer=None):
     if rank in [-1, 0]:
         opt.hyp = hyp  # add hyperparameters
         run_id = torch.load(weights).get('wandb_id') if weights.endswith('.pt') and os.path.isfile(weights) else None
+        #run_id = torch.load(weights, map_location=torch.device('cpu')).get('run_id') if weights.endswith('.pt') and os.path.isfile(weights) else None
         wandb_logger = WandbLogger(opt, save_dir.stem, run_id, data_dict)
         loggers['wandb'] = wandb_logger.wandb
         data_dict = wandb_logger.data_dict
@@ -103,6 +104,7 @@ def train(hyp, opt, device, tb_writer=None):
         with torch_distributed_zero_first(rank):
             attempt_download(weights)  # download if not found locally
         ckpt = torch.load(weights, map_location=device)  # load checkpoint
+        #ckpt = torch.load(weights, map_location=torch.device('cpu'))  # load checkpoint
         model = Model(opt.cfg or ckpt['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors'), headlayers=headlayers).to(device)  # create
         exclude = ['anchor'] if (opt.cfg or hyp.get('anchors')) and not opt.resume else []  # exclude keys
         state_dict = ckpt['model'].float().state_dict()  # to FP32
@@ -289,7 +291,8 @@ def train(hyp, opt, device, tb_writer=None):
         }
     else:
         loss_fn = {
-            'IDetect' : ComputeLoss(model, detect_layer='IDetect') # Default
+            #'IDetect' : ComputeLoss(model, kpt_label=kpt_label, detect_layer='IDetect'), # Default
+            'IKeypoint' : ComputeLoss(model, kpt_label=kpt_label, detect_layer='IKeypoint')
         }
         
     logger.info(f'Image sizes {imgsz} train, {imgsz_test} test\n'
@@ -361,7 +364,6 @@ def train(hyp, opt, device, tb_writer=None):
                     _ls, _ls_items = _loss_fn(model_outputs[name], targets[name].to(device))
                     _loss.append(_ls)
                     _loss_item.append(_ls_items)
-
                 loss =  _loss[0] if len(_loss) == 1 else sum(_loss) / len(_loss)
                 loss_items = _loss_item[0] if len(_loss_item) == 1 else get_average_tensor(_loss_item)
  
